@@ -1,4 +1,4 @@
-module github.com/win-t/pgmock
+module github.com/payfazz/go-pgmock
 
 go 1.17
 

@@ -1,7 +1,6 @@
-package pgmock_test
+package pgmock
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -11,17 +10,14 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v4"
-	"github.com/win-t/pgmock"
 )
-
-var ctx = context.Background()
 
 func TestAll(t *testing.T) {
 	if testing.Short() {
 		t.Skipf("Short test")
 	}
 
-	if !pgmock.DockerAvailable() && os.Getenv("CI") == "" {
+	if !DockerAvailable() && os.Getenv("CI") == "" {
 		t.Skipf("Docker is not available")
 	}
 
@@ -40,7 +36,7 @@ func TestAll(t *testing.T) {
 }
 
 func testController(ctrName string, destroy bool) {
-	c, err := pgmock.NewController(ctrName, 14, func(firstRun bool, connURL string) error {
+	c, err := NewController(ctrName, 14, func(firstRun bool, connURL string) error {
 		if firstRun {
 			conn, err := pgx.Connect(ctx, connURL)
 			check(err)
@@ -64,7 +60,7 @@ func testController(ctrName string, destroy bool) {
 	}
 }
 
-func testMock(c *pgmock.Controller) {
+func testMock(c *Controller) {
 	instance, err := c.Instantiate()
 	check(err)
 	defer instance.Destroy()

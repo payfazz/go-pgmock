@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	pgmockLabel    string = "github.com/win-t/pgmock=true"
+	pgmockLabel    string = "github.com/payfazz/go-pgmock=true"
 	mockIdentifier string = "mock"
 	lockID         int64  = 8982324031045737247
 )
