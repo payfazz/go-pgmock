@@ -92,10 +92,10 @@ func NewController(containerName string, postgresMajorVersion int, setup func(fi
 		}
 	}
 
-	conn.Exec(bgCtx,
-		`select pg_terminate_backend(pid) from pg_stat_activity where datname = $1`,
+	conn.Exec(bgCtx, fmt.Sprintf(
+		`select pg_terminate_backend(pid) from pg_stat_activity where datname = %s`,
 		mockPrefix,
-	)
+	))
 
 	if _, err := conn.Exec(bgCtx,
 		fmt.Sprintf(`alter database %s with is_template true allow_connections false`, mockPrefix),
@@ -200,7 +200,11 @@ func (t *Controller) destoryInstance(name string) {
 }
 
 func (t *Controller) destoryInstance_Locked(name string) {
-	t.conn.Exec(bgCtx, fmt.Sprintf(`drop database %s with (force)`, name))
+	t.conn.Exec(bgCtx, fmt.Sprintf(
+		`select pg_terminate_backend(pid) from pg_stat_activity where datname = %s`,
+		name,
+	))
+	t.conn.Exec(bgCtx, fmt.Sprintf(`drop database %s`, name))
 	t.conn.Exec(bgCtx, fmt.Sprintf(`drop role %s`, name))
 	delete(t.instances, name)
 }
