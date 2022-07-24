@@ -38,12 +38,12 @@ func TestAll(t *testing.T) {
 func testController(ctrName string, destroy bool) {
 	c, err := NewController(ctrName, 14, func(firstRun bool, connURL string) error {
 		if firstRun {
-			conn, err := pgx.Connect(ctx, connURL)
+			conn, err := pgx.Connect(bgCtx, connURL)
 			check(err)
-			defer conn.Close(ctx)
-			_, err = conn.Exec(ctx, `create table testtable(i integer)`)
+			defer conn.Close(bgCtx)
+			_, err = conn.Exec(bgCtx, `create table testtable(i integer)`)
 			check(err)
-			_, err = conn.Exec(ctx, `insert into testtable values (1234)`)
+			_, err = conn.Exec(bgCtx, `insert into testtable values (1234)`)
 			check(err)
 		}
 		return nil
@@ -65,21 +65,21 @@ func testMock(c *Controller) {
 	check(err)
 	defer instance.Destroy()
 
-	conn, err := pgx.Connect(ctx, instance.ConnURL())
+	conn, err := pgx.Connect(bgCtx, instance.ConnURL())
 	check(err)
-	defer conn.Close(ctx)
+	defer conn.Close(bgCtx)
 
 	var i int
-	err = conn.QueryRow(ctx, `select i from testtable`).Scan(&i)
+	err = conn.QueryRow(bgCtx, `select i from testtable`).Scan(&i)
 	check(err)
 	if i != 1234 {
 		panic("invalid value")
 	}
 
-	_, err = conn.Exec(ctx, `update testtable set i = 1000 where i = 1234`)
+	_, err = conn.Exec(bgCtx, `update testtable set i = 1000 where i = 1234`)
 	check(err)
 
-	err = conn.QueryRow(ctx, `select i from testtable`).Scan(&i)
+	err = conn.QueryRow(bgCtx, `select i from testtable`).Scan(&i)
 	check(err)
 	if i != 1000 {
 		panic("invalid value")

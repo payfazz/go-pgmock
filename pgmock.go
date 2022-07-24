@@ -14,12 +14,12 @@ import (
 )
 
 const (
-	pgmockLabel    string = "github.com/payfazz/go-pgmock=true"
-	mockIdentifier string = "mock"
-	lockID         int64  = 8982324031045737247
+	dockerLabel string = "github.com/payfazz/go-pgmock=true"
+	mockPrefix  string = "mock"
+	lockID      int64  = 8982324031045737247
 )
 
-var ctx = context.Background()
+var bgCtx = context.Background()
 
 type Controller struct {
 	mu        sync.Mutex
@@ -30,88 +30,79 @@ type Controller struct {
 	closed    bool
 }
 
+// NewController return new controller to create many database instance.
+//
+// containerName cannot be empty string.
+// setup function will be run to setup template database.
 func NewController(containerName string, postgresMajorVersion int, setup func(firstRun bool, connURL string) error) (*Controller, error) {
 	if containerName == "" {
 		panic("pgmock: containerName cannot be empty string")
 	}
 
-	initialized := false
-
-	hostPort, err := dockerInspectHostPortPostgres(containerName)
+	target, err := retryGetHostPort(containerName, postgresMajorVersion)
 	if err != nil {
-		dockerRunPostgres(containerName, postgresMajorVersion)
-		hostPort, err = dockerInspectHostPortPostgres(containerName)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 
-	target := &url.URL{
-		Scheme:   "postgres",
-		User:     url.UserPassword("postgres", mockIdentifier),
-		Host:     hostPort,
-		Path:     "postgres",
-		RawQuery: "sslmode=disable",
-	}
-
+	connMoved := false
 	conn, err := retryConnect(target.String())
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		if !initialized {
-			conn.Close(ctx)
+		if !connMoved {
+			conn.Close(bgCtx)
 		}
 	}()
 
-	if _, err := conn.Exec(ctx, fmt.Sprintf(`select pg_advisory_lock(%d)`, lockID)); err != nil {
+	if _, err := conn.Exec(bgCtx, fmt.Sprintf(`select pg_advisory_lock(%d)`, lockID)); err != nil {
 		return nil, fmt.Errorf("failed to acquire lock")
 	}
 
 	var templateExists bool
-	if err := conn.QueryRow(ctx,
-		fmt.Sprintf(`select count(datname) = 1 from pg_catalog.pg_database where datname = '%s'`, mockIdentifier),
+	if err := conn.QueryRow(bgCtx,
+		fmt.Sprintf(`select count(datname) = 1 from pg_catalog.pg_database where datname = '%s'`, mockPrefix),
 	).Scan(&templateExists); err != nil {
 		return nil, fmt.Errorf("cannot query template database information")
 	}
 
 	if !templateExists {
-		if _, err := conn.Exec(ctx,
-			fmt.Sprintf(`create role %s with login password '%s';`, mockIdentifier, mockIdentifier),
+		if _, err := conn.Exec(bgCtx,
+			fmt.Sprintf(`create role %s with login password '%s';`, mockPrefix, mockPrefix),
 		); err != nil {
 			return nil, fmt.Errorf("cannot create template role")
 		}
 
-		if _, err := conn.Exec(ctx,
-			fmt.Sprintf(`create database %s template template0`, mockIdentifier),
+		if _, err := conn.Exec(bgCtx,
+			fmt.Sprintf(`create database %s template template0`, mockPrefix),
 		); err != nil {
 			return nil, fmt.Errorf("cannot create template database")
 		}
 	}
 
 	if setup != nil {
-		if _, err := conn.Exec(ctx,
-			fmt.Sprintf(`alter database %s with is_template false allow_connections true`, mockIdentifier),
+		if _, err := conn.Exec(bgCtx,
+			fmt.Sprintf(`alter database %s with is_template false allow_connections true`, mockPrefix),
 		); err != nil {
 			return nil, fmt.Errorf("cannot unlock template database")
 		}
 
-		if err := setup(!templateExists, cloneTarget(target, mockIdentifier, mockIdentifier, mockIdentifier).String()); err != nil {
+		if err := setup(!templateExists, cloneTarget(target, mockPrefix, mockPrefix, mockPrefix).String()); err != nil {
 			return nil, err
 		}
 	}
 
-	if _, err := conn.Exec(ctx,
-		fmt.Sprintf(`alter database %s with is_template true allow_connections false`, mockIdentifier),
+	if _, err := conn.Exec(bgCtx,
+		fmt.Sprintf(`alter database %s with is_template true allow_connections false`, mockPrefix),
 	); err != nil {
 		return nil, fmt.Errorf("cannot lock template database")
 	}
 
-	if _, err := conn.Exec(ctx, fmt.Sprintf(`select pg_advisory_unlock(%d)`, lockID)); err != nil {
+	if _, err := conn.Exec(bgCtx, fmt.Sprintf(`select pg_advisory_unlock(%d)`, lockID)); err != nil {
 		return nil, fmt.Errorf("failed to release lock")
 	}
 
-	initialized = true
+	connMoved = true
 	return &Controller{
 		name:      containerName,
 		target:    target,
@@ -123,10 +114,7 @@ func NewController(containerName string, postgresMajorVersion int, setup func(fi
 func (t *Controller) Close() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.close_Locked()
-}
 
-func (t *Controller) close_Locked() {
 	if t.closed {
 		return
 	}
@@ -140,30 +128,20 @@ func (t *Controller) close_Locked() {
 		t.destoryInstance_Locked(name)
 	}
 
-	t.conn.Close(ctx)
+	t.conn.Close(context.Background())
 
 	t.closed = true
 }
 
 func (t *Controller) DestroyContainer() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.closed {
-		return
-	}
-
-	t.close_Locked()
-
-	dockerRm(t.name)
+	tryDockerRm(t.name)
 }
-
 func (t *Controller) Instantiate() (*Instance, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	if t.closed {
-		return nil, fmt.Errorf("template already closed")
+		return nil, fmt.Errorf("controller already closed")
 	}
 
 	initialized := false
@@ -188,15 +166,15 @@ func (t *Controller) Instantiate() (*Instance, error) {
 		}
 	}()
 
-	if _, err := t.conn.Exec(ctx, fmt.Sprintf(``+
+	if _, err := t.conn.Exec(bgCtx, fmt.Sprintf(``+
 		`create role %s with login password '%s' in role %s;`,
-		name, name, mockIdentifier)); err != nil {
+		name, name, mockPrefix)); err != nil {
 		return nil, fmt.Errorf("cannot create role")
 	}
 
-	if _, err := t.conn.Exec(ctx, fmt.Sprintf(``+
+	if _, err := t.conn.Exec(bgCtx, fmt.Sprintf(``+
 		`create database %s template %s owner %s;`,
-		name, mockIdentifier, name)); err != nil {
+		name, mockPrefix, name)); err != nil {
 		return nil, fmt.Errorf("cannot create database")
 	}
 
@@ -217,8 +195,8 @@ func (t *Controller) destoryInstance(name string) {
 }
 
 func (t *Controller) destoryInstance_Locked(name string) {
-	t.conn.Exec(ctx, fmt.Sprintf(`drop database %s with (force)`, name))
-	t.conn.Exec(ctx, fmt.Sprintf(`drop role %s`, name))
+	t.conn.Exec(bgCtx, fmt.Sprintf(`drop database %s with (force)`, name))
+	t.conn.Exec(bgCtx, fmt.Sprintf(`drop role %s`, name))
 	delete(t.instances, name)
 }
 
@@ -236,8 +214,37 @@ func (i *Instance) Destroy() {
 	i.t.destoryInstance(i.name)
 }
 
+func retryGetHostPort(containerName string, postgresMajorVersion int) (*url.URL, error) {
+	hostPort, err := dockerInspectHostPortPostgres(containerName)
+	counter := 0
+	if err != nil {
+		for {
+			counter++
+			tryDockerRunPostgres(containerName, postgresMajorVersion)
+			hostPort, err = dockerInspectHostPortPostgres(containerName)
+			if err == nil {
+				break
+			}
+			if counter >= 5 {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	target := &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword("postgres", pgPass),
+		Host:     hostPort,
+		Path:     "postgres",
+		RawQuery: "sslmode=disable",
+	}
+
+	return target, nil
+}
+
 func retryConnect(target string) (*pgx.Conn, error) {
-	retryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var (
@@ -245,9 +252,9 @@ func retryConnect(target string) (*pgx.Conn, error) {
 		err error
 	)
 	for {
-		c, err = pgx.Connect(retryCtx, target)
+		c, err = pgx.Connect(ctx, target)
 		if err == nil {
-			err = c.Ping(retryCtx)
+			err = c.Ping(ctx)
 			if err == nil {
 				return c, nil
 			}
@@ -255,7 +262,7 @@ func retryConnect(target string) (*pgx.Conn, error) {
 
 		select {
 		case <-time.After(100 * time.Millisecond):
-		case <-retryCtx.Done():
+		case <-ctx.Done():
 			return nil, fmt.Errorf("timeout when trying to connect: %w", err)
 		}
 	}
