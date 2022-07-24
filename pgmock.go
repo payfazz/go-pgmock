@@ -92,6 +92,11 @@ func NewController(containerName string, postgresMajorVersion int, setup func(fi
 		}
 	}
 
+	conn.Exec(bgCtx,
+		`select pg_terminate_backend(pid) from pg_stat_activity where datname = $1`,
+		mockPrefix,
+	)
+
 	if _, err := conn.Exec(bgCtx,
 		fmt.Sprintf(`alter database %s with is_template true allow_connections false`, mockPrefix),
 	); err != nil {
