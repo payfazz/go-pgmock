@@ -74,7 +74,7 @@ func NewController(containerName string, postgresMajorVersion int, setup func(fi
 		}
 
 		if _, err := conn.Exec(bgCtx,
-			fmt.Sprintf(`create database %s template template0`, mockPrefix),
+			fmt.Sprintf(`create database %s template template0 owner %s`, mockPrefix, mockPrefix),
 		); err != nil {
 			return nil, fmt.Errorf("cannot create template database")
 		}
@@ -141,6 +141,7 @@ func (t *Controller) Close() {
 func (t *Controller) DestroyContainer() {
 	tryDockerRm(t.name)
 }
+
 func (t *Controller) Instantiate() (*Instance, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
