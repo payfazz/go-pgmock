@@ -93,7 +93,7 @@ func NewController(containerName string, postgresMajorVersion int, setup func(fi
 	}
 
 	conn.Exec(bgCtx, fmt.Sprintf(
-		`select pg_terminate_backend(pid) from pg_stat_activity where datname = %s`,
+		`select pg_terminate_backend(pid) from pg_stat_activity where datname = '%s'`,
 		mockPrefix,
 	))
 
@@ -202,7 +202,7 @@ func (t *Controller) destoryInstance(name string) {
 
 func (t *Controller) destoryInstance_Locked(name string) {
 	t.conn.Exec(bgCtx, fmt.Sprintf(
-		`select pg_terminate_backend(pid) from pg_stat_activity where datname = %s`,
+		`select pg_terminate_backend(pid) from pg_stat_activity where datname = '%s'`,
 		name,
 	))
 	t.conn.Exec(bgCtx, fmt.Sprintf(`drop database %s`, name))
