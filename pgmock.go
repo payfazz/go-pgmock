@@ -34,49 +34,66 @@ type Controller struct {
 //
 // containerName cannot be empty string.
 // setup function will be run to setup template database.
+//
+// if error happen, it will still return non-nil *Controller, but can be only used for DestroyContainer.
 func NewController(containerName string, postgresMajorVersion int, setup func(firstRun bool, connURL string) error) (*Controller, error) {
 	if containerName == "" {
 		panic("pgmock: containerName cannot be empty string")
 	}
+	ret := &Controller{
+		name:      containerName,
+		instances: make(map[string]struct{}),
+	}
 
 	target, err := retryGetHostPort(containerName, postgresMajorVersion)
 	if err != nil {
-		return nil, err
+		return ret, err
 	}
+	ret.target = target
 
-	connMoved := false
 	conn, err := retryConnect(target.String())
 	if err != nil {
-		return nil, err
+		return ret, err
 	}
+
+	setupComplete := false
 	defer func() {
-		if !connMoved {
+		if !setupComplete {
+			conn.Exec(bgCtx, fmt.Sprintf(
+				`select pg_terminate_backend(pid) from pg_stat_activity where datname = '%s'`,
+				mockPrefix,
+			))
+			conn.Exec(bgCtx,
+				fmt.Sprintf(`alter database %s with is_template false allow_connections true`, mockPrefix),
+			)
+			conn.Exec(bgCtx, fmt.Sprintf(`drop database %s`, mockPrefix))
+			conn.Exec(bgCtx, fmt.Sprintf(`drop role %s`, mockPrefix))
 			conn.Close(bgCtx)
 		}
 	}()
 
 	if _, err := conn.Exec(bgCtx, fmt.Sprintf(`select pg_advisory_lock(%d)`, lockID)); err != nil {
-		return nil, fmt.Errorf("failed to acquire lock")
+		return ret, fmt.Errorf("failed to acquire lock")
 	}
 
 	var templateExists bool
 	if err := conn.QueryRow(bgCtx,
 		fmt.Sprintf(`select count(datname) = 1 from pg_catalog.pg_database where datname = '%s'`, mockPrefix),
 	).Scan(&templateExists); err != nil {
-		return nil, fmt.Errorf("cannot query template database information")
+		return ret, fmt.Errorf("cannot query template database information")
 	}
 
 	if !templateExists {
 		if _, err := conn.Exec(bgCtx,
 			fmt.Sprintf(`create role %s with login password '%s';`, mockPrefix, mockPrefix),
 		); err != nil {
-			return nil, fmt.Errorf("cannot create template role")
+			return ret, fmt.Errorf("cannot create template role")
 		}
 
 		if _, err := conn.Exec(bgCtx,
 			fmt.Sprintf(`create database %s template template0 owner %s`, mockPrefix, mockPrefix),
 		); err != nil {
-			return nil, fmt.Errorf("cannot create template database")
+			return ret, fmt.Errorf("cannot create template database")
 		}
 	}
 
@@ -84,11 +101,11 @@ func NewController(containerName string, postgresMajorVersion int, setup func(fi
 		if _, err := conn.Exec(bgCtx,
 			fmt.Sprintf(`alter database %s with is_template false allow_connections true`, mockPrefix),
 		); err != nil {
-			return nil, fmt.Errorf("cannot unlock template database")
+			return ret, fmt.Errorf("cannot unlock template database")
 		}
 
 		if err := setup(!templateExists, cloneTarget(target, mockPrefix, mockPrefix, mockPrefix).String()); err != nil {
-			return nil, err
+			return ret, err
 		}
 	}
 
@@ -100,23 +117,23 @@ func NewController(containerName string, postgresMajorVersion int, setup func(fi
 	if _, err := conn.Exec(bgCtx,
 		fmt.Sprintf(`alter database %s with is_template true allow_connections false`, mockPrefix),
 	); err != nil {
-		return nil, fmt.Errorf("cannot lock template database")
+		return ret, fmt.Errorf("cannot lock template database")
 	}
 
 	if _, err := conn.Exec(bgCtx, fmt.Sprintf(`select pg_advisory_unlock(%d)`, lockID)); err != nil {
-		return nil, fmt.Errorf("failed to release lock")
+		return ret, fmt.Errorf("failed to release lock")
 	}
 
-	connMoved = true
-	return &Controller{
-		name:      containerName,
-		target:    target,
-		conn:      conn,
-		instances: make(map[string]struct{}),
-	}, nil
+	ret.conn = conn
+	setupComplete = true
+	return ret, nil
 }
 
 func (t *Controller) Close() {
+	if t.conn == nil {
+		return
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -143,6 +160,10 @@ func (t *Controller) DestroyContainer() {
 }
 
 func (t *Controller) Instantiate() (*Instance, error) {
+	if t.conn == nil {
+		return nil, fmt.Errorf("invalid controller")
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
